@@ -5092,6 +5092,391 @@ blue "ArgoSB项目地址：https://github.com/yonggekkk/ArgoSB"
 echo
 }
 
+# ============================================================================
+# 以下为 trosh2023/sing-box-yg 增强功能
+# ============================================================================
+
+# ==================== 一、xHTTP (Vless-xhttp-reality) 服务器 ====================
+insxhttp(){
+if [[ ! -f '/etc/s-box/sing-box' ]]; then
+red "请先选择主菜单 1 安装 Sing-box 内核" && exit
+fi
+if [[ ! -s /etc/s-box/sb.json ]] || ! echo "$(cat /etc/s-box/sb.json 2>/dev/null)" | jq empty >/dev/null 2>&1; then
+red "检测到 Sing-box 配置文件缺失或损坏，请先选择主菜单 1 安装 Sing-box" && exit
+fi
+red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+green "安装 Vless-xhttp-reality 服务器（自动安装依赖）"
+echo
+# 自动安装所需依赖
+if [[ x"${release}" == x"alpine" ]]; then
+apk update && apk add curl openssl jq coreutils qrencode
+elif [ -x "$(command -v apt-get)" ]; then
+apt update -y && apt install -y curl openssl jq coreutils qrencode
+elif [ -x "$(command -v yum)" ]; then
+yum install -y curl openssl jq coreutils qrencode
+elif [ -x "$(command -v dnf)" ]; then
+dnf install -y curl openssl jq coreutils qrencode
+fi
+xhttp_port=$(shuf -i 10000-65535 -n 1)
+readp "设置 xHTTP 端口[1-65535] (回车随机10000-65535)：" input
+[[ -n $input ]] && xhttp_port=$input
+until [[ -z $(ss -tunlp | grep -w tcp | awk '{print $5}' | sed 's/.*://g' | grep -w "$xhttp_port") ]]; do
+yellow "端口被占用，请重新输入" && readp "xHTTP端口:" xhttp_port
+done
+readp "Vless-xhttp的SNI域名 (回车默认apple.com)：" xhttp_sni
+[[ -z $xhttp_sni ]] && xhttp_sni="apple.com"
+readp "设置xHTTP的Path路径 (回车默认 /s)：" xhttp_path
+[[ -z $xhttp_path ]] && xhttp_path="/s"
+xhttp_uuid=$(/etc/s-box/sing-box generate uuid)
+xkp=$(/etc/s-box/sing-box generate reality-keypair)
+xprivate_key=$(echo "$xkp" | awk '/PrivateKey/ {print $2}' | tr -d '"')
+xpublic_key=$(echo "$xkp" | awk '/PublicKey/ {print $2}' | tr -d '"')
+xshort_id=$(/etc/s-box/sing-box generate rand --hex 4)
+if ! echo "$(cat /etc/s-box/sb.json 2>/dev/null)" | jq -e '(.inbounds // [])[] | select(.tag=="xhttp-sb")' >/dev/null 2>&1; then
+cp /etc/s-box/sb.json /etc/s-box/sb.json.bak
+newinbound='{
+  "type": "vless",
+  "sniff": true,
+  "sniff_override_destination": true,
+  "tag": "xhttp-sb",
+  "listen": "::",
+  "listen_port": '"$xhttp_port"',
+  "users": [
+    {
+      "uuid": "'"$xhttp_uuid"'",
+      "flow": ""
+    }
+  ],
+  "tls": {
+    "enabled": true,
+    "server_name": "'"$xhttp_sni"'",
+    "reality": {
+      "enabled": true,
+      "handshake": {
+        "server": "'"$xhttp_sni"'",
+        "server_port": 443
+      },
+      "private_key": "'"$xprivate_key"'",
+      "short_id": ["'"$xshort_id"'"]
+    }
+  },
+  "transport": {
+    "type": "xhttp",
+    "path": "'"$xhttp_path"'",
+    "max_early_data": 2048,
+    "early_data_header_name": "Sec-WebSocket-Protocol"
+  }
+}'
+echo "$(cat /etc/s-box/sb.json)" | jq --argjson ib "$newinbound" '.inbounds = ((.inbounds // []) + [$ib])' > /etc/s-box/sb.json.new
+mv /etc/s-box/sb.json.new /etc/s-box/sb.json
+restartsb
+sleep 2
+sbactive
+cat > /etc/s-box/xhttp.log <<XEOF
+xhttp_port=$xhttp_port
+xhttp_sni=$xhttp_sni
+xhttp_path=$xhttp_path
+xhttp_uuid=$xhttp_uuid
+xpublic_key=$xpublic_key
+xshort_id=$xshort_id
+XEOF
+green "xHTTP 节点安装成功"
+xhttp_share
+else
+red "已检测到 xHTTP 节点，请先卸载再安装" && sleep 2
+fi
+}
+
+uninsxhttp(){
+if [[ ! -f '/etc/s-box/sb.json' ]]; then red "未安装 Sing-box" && exit; fi
+if ! echo "$(cat /etc/s-box/sb.json 2>/dev/null)" | jq -e '(.inbounds // [])[] | select(.tag=="xhttp-sb")' >/dev/null 2>&1; then
+red "未检测到 xHTTP 节点" && sleep 2 && return
+fi
+readp "确认卸载 xHTTP 节点？(y/n)：" yn
+[[ "$yn" != "y" ]] && return
+echo "$(cat /etc/s-box/sb.json)" | jq 'del((.inbounds // [])[] | select(.tag=="xhttp-sb"))' > /etc/s-box/sb.json.new
+mv /etc/s-box/sb.json.new /etc/s-box/sb.json
+restartsb
+rm -rf /etc/s-box/xhttp.log
+green "xHTTP 节点已卸载" && sleep 3
+}
+
+xhttp_share(){
+source /etc/s-box/xhttp.log 2>/dev/null
+if [[ -z $xhttp_port ]]; then red "未安装 xHTTP 节点" && sleep 2 && return; fi
+xserver_ip=$(curl -s4m5 icanhazip.com -k || curl -s6m5 icanhazip.com -k)
+[[ -n $v4 ]] && xserver_ip=$v4
+[[ -z $xserver_ip ]] && xserver_ip=$v6
+uri="vless://$xhttp_uuid@$xserver_ip:$xhttp_port?encryption=none&security=reality&sni=$xhttp_sni&fp=chrome&pbk=$xpublic_key&sid=$xshort_id&type=xhttp&path=$xhttp_path#xhttp-$hostname"
+echo
+white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+red "🚀 xHTTP 节点分享链接："
+echo -e "${yellow}$uri${plain}"
+echo
+echo -e "${yellow}二维码：${plain}"
+echo "$uri" | qrencode -t ANSIUTF8 2>/dev/null || true
+white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+echo
+readp "按回车返回上层：" dummy
+}
+
+xhttpmenu(){
+echo
+green "xHTTP (Vless-xhttp-reality) 服务器管理"
+if echo "$(cat /etc/s-box/sb.json 2>/dev/null)" | jq -e '(.inbounds // [])[] | select(.tag=="xhttp-sb")' >/dev/null 2>&1; then
+green "状态：${bblue}已安装${plain}"
+else
+green "状态：${red}未安装${plain}"
+fi
+yellow "1：安装 xHTTP 服务器 (自动安装依赖)"
+yellow "2：卸载 xHTTP 服务器"
+yellow "3：查看 xHTTP 节点分享链接/二维码"
+yellow "0：返回上层"
+readp "请选择【0-3】：" menu
+if [ "$menu" = "1" ]; then
+insxhttp
+elif [ "$menu" = "2" ]; then
+uninsxhttp
+elif [ "$menu" = "3" ]; then
+xhttp_share
+fi
+}
+
+# ==================== 二、Snell 服务器 ====================
+insnell(){
+if [ -f /etc/systemd/system/snell.service ]; then
+red "已安装 Snell 服务，无法再次安装" && exit
+fi
+red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+green "安装 Snell 服务器（自动安装依赖）"
+if [[ x"${release}" == x"alpine" ]]; then
+apk update && apk add wget curl coreutils unzip
+elif [ -x "$(command -v apt-get)" ]; then
+apt update -y && apt install -y wget curl coreutils unzip
+elif [ -x "$(command -v yum)" ]; then
+yum update -y && yum install -y wget curl coreutils unzip
+elif [ -x "$(command -v dnf)" ]; then
+dnf update -y && dnf install -y wget curl coreutils unzip
+fi
+snellver=$(curl -sL https://api.github.com/repos/surge-networks/snell/releases/latest | grep -Eo '"tag_name": *"[^"]*"' | head -n1 | grep -Eo '[0-9.]+')
+[[ -z $snellver ]] && snellver="4.1.1"
+case $(uname -m) in
+aarch64) snellcpu="aarch64";;
+x86_64) snellcpu="amd64";;
+*) red "目前脚本不支持 $(uname -m) 架构" && exit;;
+esac
+mkdir -p /etc/snell
+snellzip="snell-server-v$snellver-linux-$snellcpu.zip"
+snellurl="https://github.com/surge-networks/snell/releases/download/v$snellver/$snellzip"
+curl -L -o /etc/snell/snell.zip -# --retry 2 "$snellurl"
+if [ ! -f /etc/snell/snell.zip ] || [[ ! -s /etc/snell/snell.zip ]]; then
+red "Snell 下载失败，请检测网络能否访问 Github" && exit
+fi
+cd /etc/snell
+unzip -o snell.zip >/dev/null 2>&1 || (tar xzf snell.zip 2>/dev/null || true)
+rm -rf /etc/snell/snell.zip
+if [ ! -f /etc/snell/snell-server ]; then
+red "Snell 解压失败" && exit
+fi
+chmod +x /etc/snell/snell-server
+readp "设置 Snell 监听端口 (回车默认 8388)：" snell_port
+[[ -z $snell_port ]] && snell_port=8388
+snell_psk=$(openssl rand -base64 12)
+readp "设置 Snell 密码(PSK) (回车自动生成)：" input
+[[ -n $input ]] && snell_psk=$input
+readp "设置 Snell 服务模式(0=TCP,1=UDP,2=Both) (回车默认0)：" smode
+[[ -z $smode ]] && smode=0
+if [[ x"${release}" == x"alpine" ]]; then
+cat > /etc/init.d/snell <<EOF
+#!/sbin/openrc-run
+description="snell server"
+command="/etc/snell/snell-server"
+command_args="-c /etc/snell/snell.conf"
+command_background=true
+pidfile="/var/run/snell.pid"
+EOF
+chmod +x /etc/init.d/snell
+rc-update add snell default
+else
+cat > /etc/systemd/system/snell.service <<EOF
+[Unit]
+Description=Snell Server
+After=network.target nss-lookup.target
+[Service]
+User=root
+WorkingDirectory=/etc/snell
+ExecStart=/etc/snell/snell-server -c /etc/snell/snell.conf
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=infinity
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable snell >/dev/null 2>&1
+systemctl start snell
+fi
+cat > /etc/snell/snell.conf <<EOF
+[snell-server]
+listen = 0.0.0.0:$snell_port
+psk = $snell_psk
+ipv6 = false
+mode = tcp
+EOF
+[[ "$smode" = "1" ]] && sed -i 's/mode = tcp/mode = udp/' /etc/snell/snell.conf
+[[ "$smode" = "2" ]] && sed -i 's/mode = tcp/mode = both/' /etc/snell/snell.conf
+if [[ x"${release}" == x"alpine" ]]; then
+rc-service snell restart
+else
+systemctl restart snell
+fi
+echo
+green "Snell 服务器安装成功！"
+blue "端口：$snell_port"
+blue "密码(PSK)：$snell_psk"
+sleep 8
+}
+
+unsnell(){
+if [[ x"${release}" == x"alpine" ]]; then
+rc-service snell stop 2>/dev/null
+rc-update del snell default 2>/dev/null
+rm -f /etc/init.d/snell
+else
+systemctl stop snell >/dev/null 2>&1
+systemctl disable snell >/dev/null 2>&1
+rm -f /etc/systemd/system/snell.service
+systemctl daemon-reload
+fi
+rm -rf /etc/snell
+green "Snell 已卸载" && sleep 3
+}
+
+snellstatus(){
+if [[ x"${release}" == x"alpine" ]]; then
+rc-service snell status
+else
+systemctl status snell
+fi
+echo
+readp "按回车返回：" dummy
+}
+
+snellmenu(){
+echo
+green "Snell 服务器管理"
+if [ -f /etc/systemd/system/snell.service ] || [ -f /etc/init.d/snell ]; then
+green "状态：${bblue}已安装${plain}"
+else
+green "状态：${red}未安装${plain}"
+fi
+yellow "1：安装 Snell 服务器 (自动安装依赖)"
+yellow "2：卸载 Snell 服务器"
+yellow "3：查看 Snell 运行状态"
+yellow "0：返回上层"
+readp "请选择【0-3】：" menu
+if [ "$menu" = "1" ]; then
+insnell
+elif [ "$menu" = "2" ]; then
+unsnell
+elif [ "$menu" = "3" ]; then
+snellstatus
+fi
+}
+
+# ==================== 三、服务器探针 + 三网测试 ====================
+bench(){
+red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+green "服务器综合探针 (CPU/内存/磁盘/带宽/三网测试)"
+readp "1：一键综合测试 (CPU/内存/磁盘/网络回程/三网测速)\n2：仅三网测速\n3：仅回程路由测试\n0：返回上层\n请选择【0-3】：" menu
+if [ "$menu" = "1" ]; then
+echo
+green "开始综合测试，请耐心等待 (可能需要数分钟)……"
+curl -sL https://bench.im/bash 2>/dev/null | bash || \
+curl -sL https://raw.githubusercontent.com/mason2017/superspeed/master/superspeed.sh 2>/dev/null | bash
+elif [ "$menu" = "2" ]; then
+echo
+green "三网测速 (电信/联通/移动)……"
+curl -sL https://raw.githubusercontent.com/mason2017/superspeed/master/superspeed.sh 2>/dev/null | bash
+elif [ "$menu" = "3" ]; then
+echo
+green "回程路由测试 (三网)……"
+bash <(curl -Ls https://raw.githubusercontent.com/zq/shell/master/returnpath/test.sh) 2>/dev/null || \
+bash <(curl -Ls https://raw.githubusercontent.com/zhanghanyun/backtrace/main/install.sh) 2>/dev/null
+else
+return
+fi
+echo
+readp "按回车返回上层：" dummy
+}
+
+# ==================== 四、修改 Linux 时区 ====================
+changezone(){
+red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+green "修改 Linux 系统时区"
+cur=$(timedatectl 2>/dev/null | grep -i "Time zone" | awk '{print $3}' || date +%Z)
+blue "当前时区：$cur"
+yellow "1：修改为 上海 (Asia/Shanghai)"
+yellow "2：修改为 香港 (Asia/Hong_Kong)"
+yellow "3：修改为 新加坡 (Asia/Singapore)"
+yellow "4：修改为 东京 (Asia/Tokyo)"
+yellow "5：修改为 伦敦 (Europe/London)"
+yellow "6：修改为 纽约 (America/New_York)"
+yellow "7：手动输入时区 (如 Asia/Taipei)"
+yellow "0：返回上层"
+readp "请选择【0-7】：" menu
+case "$menu" in
+1) zt="Asia/Shanghai";;
+2) zt="Asia/Hong_Kong";;
+3) zt="Asia/Singapore";;
+4) zt="Asia/Tokyo";;
+5) zt="Europe/London";;
+6) zt="America/New_York";;
+7) readp "请输入时区 (例 Asia/Taipei)：" zt;;
+*) return;;
+esac
+if [[ x"${release}" == x"alpine" ]]; then
+apk add tzdata >/dev/null 2>&1
+cp /usr/share/zoneinfo/$zt /etc/localtime >/dev/null 2>&1
+echo "$zt" > /etc/timezone
+else
+if [ -x "$(command -v timedatectl)" ]; then
+timedatectl set-timezone "$zt"
+else
+ln -sf /usr/share/zoneinfo/$zt /etc/localtime
+fi
+fi
+green "时区已修改为：$zt"
+blue "当前系统时间：$(date '+%Y-%m-%d %H:%M:%S %Z')"
+echo
+readp "按回车返回上层：" dummy
+}
+
+# ==================== 五、一键升级 Linux 系统 ====================
+upsys(){
+red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+green "一键升级 Linux 系统"
+opnow=$(cat /etc/os-release 2>/dev/null | grep -i pretty_name | cut -d \" -f2)
+blue "当前系统：$opnow"
+readp "确认执行系统升级？(y/n)：" yn
+[[ "$yn" != "y" ]] && return
+echo
+green "开始升级，请耐心等待……"
+if [ -x "$(command -v apt-get)" ]; then
+apt update -y && apt upgrade -y
+elif [ -x "$(command -v dnf)" ]; then
+dnf update -y
+elif [ -x "$(command -v yum)" ]; then
+yum update -y
+elif [[ x"${release}" == x"alpine" ]]; then
+apk update && apk upgrade
+else
+red "无法识别的包管理器，无法升级" && sleep 3 && return
+fi
+green "系统升级完成" && sleep 3
+}
+
 clear
 white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" 
 echo -e "${bblue} ░██     ░██      ░██ ██ ██         ░█${plain}█   ░██     ░██   ░██     ░█${red}█   ░██${plain}  "
@@ -5127,6 +5512,12 @@ green "14. 添加 WARP-plus-Socks5 代理模式 【本地Warp/多地区Psiphon-V
 green "15. 双栈VPS切换IPV4/IPV6配置输出"
 white "----------------------------------------------------------------------------------"
 green "16. Sing-box-yg脚本使用说明书"
+white "----------------------------------------------------------------------------------"
+green "17. 安装/管理 xHTTP (Vless-xhttp-reality) 服务器"
+green "18. 安装/管理 Snell 服务器"
+green "19. 服务器探针+三网测试 【CPU/内存/磁盘/三网测速/回程路由】"
+green "20. 修改 Linux 系统时区"
+green "21. 一键升级 Linux 系统"
 white "----------------------------------------------------------------------------------"
 green " 0. 退出脚本"
 red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
@@ -5235,7 +5626,7 @@ showprotocol
 fi
 red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 echo
-readp "请输入数字【0-16】:" Input
+readp "请输入数字【0-21】:" Input
 case "$Input" in  
  1 ) instsllsingbox;;
  2 ) unins;;
@@ -5253,5 +5644,10 @@ case "$Input" in
 14 ) inssbwpph;;
 15 ) wgcfgo && sbshare;;
 16 ) sbsm;;
+17 ) xhttpmenu;;
+18 ) snellmenu;;
+19 ) bench;;
+20 ) changezone;;
+21 ) upsys;;
  * ) exit 
 esac
